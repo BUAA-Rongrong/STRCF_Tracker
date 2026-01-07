@@ -176,6 +176,7 @@ class STRCF:
                 ) / B[..., None]
             )
 
+            #print("gamma + mu:", gamma + mu)
             f_spatial = np.real(np.fft.ifft2(gamma * f + h, axes=(0, 1)))
             g = np.fft.fft2(
                 f_spatial / (gamma + self.lambda_reg * self.reg_window[..., None] ** 2),
@@ -260,7 +261,7 @@ class STRCF:
 # Demo
 # ==================================================
 if __name__ == '__main__':
-    cap = cv2.VideoCapture("./video/1.mp4")
+    cap = cv2.VideoCapture("./video/4.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
