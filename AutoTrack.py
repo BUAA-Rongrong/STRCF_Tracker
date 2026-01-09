@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+import matplotlib.pyplot as plt
 
 class AutoTrack:
     def __init__(self):
@@ -15,8 +16,10 @@ class AutoTrack:
         self.phi = 0.3 #更新阈值
 
         #更新ref_mu
-        self.zeta = 13.0
+        self.zeta = 20.0
         self.nu = 0.2
+
+        self.eta = 0
 
         # ADMM
         self.gamma_init = 1.0
@@ -77,6 +80,7 @@ class AutoTrack:
         self.yf = np.fft.fft2(y)
 
         self.reg_window = self._init_reg_window((Hc, Wc))
+        #self.reg_window = self._init_reg_window1((Hc, Wc), 0.5, 1, 100)
         self.reg_window1 = self.reg_window
 
         self.hog = cv2.HOGDescriptor(
@@ -111,8 +115,9 @@ class AutoTrack:
 
         #2.从第2帧开始，更新ref_mu
         occ = False
-        delta_resp = 0
 
+        psr = self.compute_psr(response, 5)
+        #print("psr: ", psr)
         # print("response: ", response)
         # print("response_pre: ", self.response_prev)
         if response is not None and self.response_prev is not None:
@@ -129,7 +134,7 @@ class AutoTrack:
         if occ == False:
             self._train(frame, response, disp)
 
-        return self.pos.copy(), self.target_sz.copy()
+        return self.pos.copy(), self.target_sz.copy(), response
 
     # ==================================================
     # 检测
@@ -201,7 +206,7 @@ class AutoTrack:
             #mu = max(mu, 1e-6)
 
             # print("diff: ", diff)
-            print("mu: ", mu, "ref mu: ", self.ref_mu)
+            # print("mu: ", mu, "ref mu: ", self.ref_mu)
 
             # ===== 拉格朗日乘子 =====
             self.l_f += gamma * (self.g_f - self.h_f)
@@ -262,15 +267,45 @@ class AutoTrack:
         m = self.zeta
         p = self.nu
         eta = np.linalg.norm(response_diff.ravel(), 2) / 1e4
-        print("eta: ", eta)
+        #print("eta: ", eta)
+        self.eta = eta
 
         if eta < self.phi:
             return m / (1 + np.log(p * eta + 1)), False
         else:
             return 50.0, True
 
+    def compute_psr(self, response, peak_size=5):
+        """
+        Compute Peak-to-Sidelobe Ratio (PSR)
 
+        Parameters
+        ----------
+        response : ndarray (H, W)
+        peak_size : int
+            window size to exclude around the peak
 
+        Returns
+        -------
+        psr : float
+        """
+
+        H, W = response.shape
+        py, px = np.unravel_index(np.argmax(response), response.shape)
+
+        half = peak_size // 2
+        y1, y2 = max(0, py - half), min(H, py + half + 1)
+        x1, x2 = max(0, px - half), min(W, px + half + 1)
+
+        side = response.copy()
+        side[y1:y2, x1:x2] = 0
+
+        mean = np.mean(side)
+        std = np.std(side) + 1e-6
+
+        psr = (response[py, px] - mean) / std
+        print("psr: ", psr)
+        return psr
 
     # ==================================================
     # 工具
@@ -288,9 +323,40 @@ class AutoTrack:
         dist = (y - cy) ** 2 + (x - cx) ** 2
         return np.exp(dist / (0.5 * h * w))
 
+    def _init_reg_window1(self, window_sz, ratio, reg_window_min, reg_window_max):
+        H, W = window_sz
+        reg_window = np.ones((H, W), np.float32) * reg_window_max
+
+        ch = int(np.round(H * ratio))
+        cw = int(np.round(W * ratio))
+
+        ch = max(1, min(ch, W))
+        cw = max(1, min(cw, W))
+
+        cy = (H - 1) // 2
+        cx = (W - 1) // 2
+
+        h_start = cy - ch // 2
+        h_end = h_start + ch
+        w_start = cx - cw // 2
+        w_end = w_start + cw
+
+        h_start = max(0, h_start)
+        w_start = max(0, w_start)
+        h_end = min(H, h_end)
+        w_end = min(W, w_end)
+
+        reg_window[h_start:h_end, w_start:w_end] = reg_window_min
+
+        print(reg_window.shape)
+        return reg_window
+
 
 if __name__ == '__main__':
-    cap = cv2.VideoCapture("./video/1.mp4")
+
+    ax_flag = True
+
+    cap = cv2.VideoCapture("./video/4.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
@@ -300,14 +366,57 @@ if __name__ == '__main__':
     tracker = AutoTrack()
     tracker.init(frame, bbox)
 
+    frame_idx = 0
+
+    if ax_flag:
+        # ===== eta 曲线 =====
+        etas = []
+        plt.ion()
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+
+        # --- 左：eta ---
+        ax1.set_title("Eta over Time")
+        ax1.set_xlabel("Frame")
+        ax1.set_ylabel("Eta")
+        eta_x, eta_y = [], []
+        line_eta, = ax1.plot([], [], lw=2)
+
+        # --- 右：response heatmap ---
+        ax2.set_title("Response Heatmap")
+        heatmap = ax2.imshow(
+            np.zeros((tracker.Hc, tracker.Wc)),
+            cmap="jet",
+            interpolation="nearest",
+            origin="upper"
+        )
+        plt.colorbar(heatmap, ax=ax2)
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        pos, target_sz = tracker.track(frame)
+        pos, target_sz, response = tracker.track(frame)
         cy, cx = pos.astype(int)
         h, w = target_sz.astype(int)
+
+        frame_idx += 1
+
+        if ax_flag:
+            # ===== eta 更新 =====
+            eta = tracker.eta
+            eta_x.append(len(eta_x))
+            eta_y.append(eta)
+            line_eta.set_data(eta_x, eta_y)
+            ax1.relim()
+            ax1.autoscale_view()
+
+            # ===== response heatmap 更新 =====
+            heatmap.set_data(response)
+            heatmap.set_clim(vmin=response.min(), vmax=response.max())
+
+            plt.pause(0.001)
 
         cv2.rectangle(
             frame,
@@ -316,9 +425,15 @@ if __name__ == '__main__':
             (0, 255, 0), 2
         )
 
+        cv2.putText(frame, f"Frame: {frame_idx}", (cx - w // 2, cy - h//2 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
         cv2.imshow("AutoTrack HOG Tracking", frame)
         if cv2.waitKey(1) & 0xFF == 27:
             break
+
+    # plt.plot(etas)
+    # plt.show()
 
     cap.release()
     cv2.destroyAllWindows()

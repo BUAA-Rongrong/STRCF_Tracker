@@ -261,7 +261,7 @@ class STRCF:
 # Demo
 # ==================================================
 if __name__ == '__main__':
-    cap = cv2.VideoCapture("./video/4.mp4")
+    cap = cv2.VideoCapture("./video/basket.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
