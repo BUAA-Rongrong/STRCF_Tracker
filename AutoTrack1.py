@@ -20,6 +20,7 @@ class AutoTrack:
         self.nu = 0.2
 
         self.eta = 0
+        self.psr = 0
 
         # ADMM
         self.gamma_init = 1.0
@@ -116,13 +117,12 @@ class AutoTrack:
         #2.从第2帧开始，更新ref_mu
         occ = False
 
-        psr = self.compute_psr(response, 5)
-        #print("psr: ", psr)
         # print("response: ", response)
         # print("response_pre: ", self.response_prev)
         if response is not None and self.response_prev is not None:
             response_diff = self._align_and_diff_response(response, disp)
-            ref_mu, occ = self._update_ref_mu(response_diff)
+            #ref_mu, occ = self._update_ref_mu(response_diff)
+            ref_mu, occ = self._update_ref_mu1(response, 25, 10)
             self.ref_mu = ref_mu
             self.mu = self.zeta
             print("occ: ", occ)
@@ -206,7 +206,7 @@ class AutoTrack:
             #mu = max(mu, 1e-6)
 
             # print("diff: ", diff)
-            # print("mu: ", mu, "ref mu: ", self.ref_mu)
+            print("mu: ", mu, "ref mu: ", self.ref_mu)
 
             # ===== 拉格朗日乘子 =====
             self.l_f += gamma * (self.g_f - self.h_f)
@@ -275,20 +275,18 @@ class AutoTrack:
         else:
             return 50.0, True
 
+    def _update_ref_mu1(self, response, theta_max, theta_min):
+        psr = self.compute_psr(response)
+        psr_value = 8
+        alpha = 0.05
+        if psr > psr_value:
+            ref_mu = theta_min + (theta_max - theta_min) * np.exp(-alpha * psr)
+            return ref_mu, False
+        else:
+            return theta_max, True
+
+
     def compute_psr(self, response, peak_size=5):
-        """
-        Compute Peak-to-Sidelobe Ratio (PSR)
-
-        Parameters
-        ----------
-        response : ndarray (H, W)
-        peak_size : int
-            window size to exclude around the peak
-
-        Returns
-        -------
-        psr : float
-        """
 
         H, W = response.shape
         py, px = np.unravel_index(np.argmax(response), response.shape)
@@ -304,6 +302,7 @@ class AutoTrack:
         std = np.std(side) + 1e-6
 
         psr = (response[py, px] - mean) / std
+        self.psr = psr
         print("psr: ", psr)
         return psr
 
@@ -356,7 +355,7 @@ if __name__ == '__main__':
 
     ax_flag = True
 
-    cap = cv2.VideoCapture("./video/4.mp4")
+    cap = cv2.VideoCapture("./video/1.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
@@ -370,7 +369,6 @@ if __name__ == '__main__':
 
     if ax_flag:
         # ===== eta 曲线 =====
-        etas = []
         plt.ion()
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
@@ -379,8 +377,8 @@ if __name__ == '__main__':
         ax1.set_title("Eta over Time")
         ax1.set_xlabel("Frame")
         ax1.set_ylabel("Eta")
-        eta_x, eta_y = [], []
-        line_eta, = ax1.plot([], [], lw=2)
+        psr_x, psr_y = [], []
+        line_psr, = ax1.plot([], [], lw=2)
 
         # --- 右：response heatmap ---
         ax2.set_title("Response Heatmap")
@@ -405,10 +403,10 @@ if __name__ == '__main__':
 
         if ax_flag:
             # ===== eta 更新 =====
-            eta = tracker.eta
-            eta_x.append(len(eta_x))
-            eta_y.append(eta)
-            line_eta.set_data(eta_x, eta_y)
+            psr = tracker.psr
+            psr_x.append(len(psr_x))
+            psr_y.append(psr)
+            line_psr.set_data(psr_x, psr_y)
             ax1.relim()
             ax1.autoscale_view()
 

@@ -117,7 +117,7 @@ class AutoTrack:
         occ = False
 
         psr = self.compute_psr(response, 5)
-        #print("psr: ", psr)
+
         # print("response: ", response)
         # print("response_pre: ", self.response_prev)
         if response is not None and self.response_prev is not None:
@@ -356,7 +356,7 @@ if __name__ == '__main__':
 
     ax_flag = True
 
-    cap = cv2.VideoCapture("./video/4.mp4")
+    cap = cv2.VideoCapture("./video/2.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
