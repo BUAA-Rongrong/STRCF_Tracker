@@ -279,10 +279,10 @@ class AutoTrack:
         psr = self.compute_psr(response)
         psr_value = 8
         alpha = 0.05
-        if psr > psr_value:
+        if psr > psr_value:#未出现遮挡
             ref_mu = theta_min + (theta_max - theta_min) * np.exp(-alpha * psr)
             return ref_mu, False
-        else:
+        else:#出现遮挡，停止更新
             return theta_max, True
 
 
@@ -355,7 +355,7 @@ if __name__ == '__main__':
 
     ax_flag = True
 
-    cap = cv2.VideoCapture("./video/1.mp4")
+    cap = cv2.VideoCapture("./video/2.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
