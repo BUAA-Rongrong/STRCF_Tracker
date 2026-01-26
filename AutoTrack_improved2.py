@@ -3,6 +3,8 @@ import cv2
 import matplotlib.pyplot as plt
 from collections import deque
 
+#添加历史滤波器
+
 class AutoTrack:
     def __init__(self):
         # ================= 超参数 =================
@@ -395,7 +397,7 @@ if __name__ == '__main__':
 
     ax_flag = False
 
-    cap = cv2.VideoCapture("./video/4.mp4")
+    cap = cv2.VideoCapture("./video/2.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
