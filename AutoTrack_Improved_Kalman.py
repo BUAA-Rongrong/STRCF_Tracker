@@ -3,6 +3,8 @@ import cv2
 import matplotlib.pyplot as plt
 from collections import deque
 
+# 利用Kalman滤波器融合AutoTrack跟踪结果(遮挡Kalman预测占比较大）
+
 class AutoTrack:
     def __init__(self):
         # ================= 超参数 =================
