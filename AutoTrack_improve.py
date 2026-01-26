@@ -4,6 +4,8 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 
+
+#添加了背景掩码
 class AutoTrack:
     def __init__(self):
         # ================= 超参数 =================
