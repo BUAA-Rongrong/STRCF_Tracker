@@ -15,15 +15,22 @@ class AutoTrack:
         self.ref_mu = 0
         self.epsilon = 1
         self.mu = 0
-        self.delta = 0.2 #响应变化调整系数
+        self.delta = 0.1 #响应变化调整系数
         self.phi = 0.3 #更新阈值
 
         #更新ref_mu
-        self.zeta = 20.0
+        self.zeta = 15.0
         self.nu = 0.2
 
         self.eta = 0
         self.psr = 0
+
+        self.theta_max = 18.0
+        self.theta_min = 10.0
+        self.alpha1 = 0.05
+
+        self.alpha = 0.2
+        self.beta = 0.2
 
         # ADMM
         self.gamma_init = 1.0
@@ -133,7 +140,7 @@ class AutoTrack:
             response_diff = self._align_and_diff_response(response, disp)
             psr = self.compute_psr(response)
             #ref_mu, occ = self._update_ref_mu(response_diff)
-            ref_mu, occ = self._update_ref_mu1(response, psr,25, 10)
+            ref_mu, occ = self._update_ref_mu1(response, psr,self.theta_max, self.theta_min)
             self.ref_mu = ref_mu
             self.mu = self.zeta
             #print("occ: ", occ)
@@ -316,9 +323,9 @@ class AutoTrack:
     def _update_ref_mu1(self, response, psr, theta_max, theta_min):
 
         psr_value = 8
-        alpha = 0.05
+        alpha = self.alpha1
         if psr > psr_value:#未出现遮挡
-            ref_mu = theta_min + (theta_max - theta_min) * np.exp(-alpha * psr)
+            ref_mu = theta_min + (theta_max - theta_min) * np.exp(-alpha * (psr- psr_value))
             return ref_mu, False
         else:#出现遮挡，停止更新
             return theta_max, True
@@ -344,8 +351,8 @@ class AutoTrack:
         return psr
 
     def compute_psi_from_psr(self, psr):
-        alpha = 0.1
-        beta = 0.1
+        alpha = self.alpha
+        beta = self.beta
         psi = 1/(1 + np.log(1 + alpha * psr)) - beta
         return psi
     # ==================================================
@@ -397,7 +404,7 @@ if __name__ == '__main__':
 
     ax_flag = False
 
-    cap = cv2.VideoCapture("./video/2.mp4")
+    cap = cv2.VideoCapture("./video/test.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
@@ -416,9 +423,9 @@ if __name__ == '__main__':
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
 
         # --- 左：eta ---
-        ax1.set_title("Eta over Time")
+        ax1.set_title("PSR over Time")
         ax1.set_xlabel("Frame")
-        ax1.set_ylabel("Eta")
+        ax1.set_ylabel("PSR")
         psr_x, psr_y = [], []
         line_psr, = ax1.plot([], [], lw=2)
 
@@ -477,3 +484,6 @@ if __name__ == '__main__':
 
     cap.release()
     cv2.destroyAllWindows()
+    if ax_flag:
+        plt.ioff()
+        plt.show()

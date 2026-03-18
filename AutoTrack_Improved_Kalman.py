@@ -25,6 +25,13 @@ class AutoTrack:
         self.eta = 0
         self.psr = 0
 
+        self.theta_max = 18.0
+        self.theta_min = 2.0
+        self.alpha1 = 0.05
+
+        self.alpha = 0.2
+        self.beta = 0.2
+
         # ADMM
         self.gamma_init = 1.0
         self.gamma_max = 10000.0
@@ -96,8 +103,8 @@ class AutoTrack:
         self.kf.errorCovPost = np.eye(4, dtype=np.float32)
         
         # 卡尔曼融合权重参数
-        self.kalman_weight_high_psr = 0.3  # PSR高时，30%卡尔曼，70%检测
-        self.kalman_weight_low_psr = 0.7   # PSR低时，70%卡尔曼，30%检测
+        self.kalman_weight_high_psr = 0.5  # PSR高时，30%卡尔曼，70%检测
+        self.kalman_weight_low_psr = 0.8   # PSR低时，70%卡尔曼，30%检测
         self.psr_smooth_threshold = 8.0    # PSR平滑阈值
 
 
@@ -211,7 +218,7 @@ class AutoTrack:
         occ = False
         if response is not None and self.response_prev is not None:
             response_diff = self._align_and_diff_response(response, disp)
-            ref_mu, occ = self._update_ref_mu1(response, psr, 25, 10)
+            ref_mu, occ = self._update_ref_mu1(response, psr, self.theta_max, self.theta_min)
             self.ref_mu = ref_mu
             self.mu = self.zeta
             
@@ -390,9 +397,9 @@ class AutoTrack:
 
     def _update_ref_mu1(self, response, psr, theta_max, theta_min):
         psr_value = 8
-        alpha = 0.05
+        alpha = self.alpha1
         if psr > psr_value:
-            ref_mu = theta_min + (theta_max - theta_min) * np.exp(-alpha * psr)
+            ref_mu = theta_min + (theta_max - theta_min) * np.exp(-alpha * (psr-psr_value))
             return ref_mu, False
         else:
             return theta_max, True
@@ -418,8 +425,8 @@ class AutoTrack:
 
     def compute_psi_from_psr(self, psr):
         """根据PSR计算权重系数"""
-        alpha = 0.1
-        beta = 0.1
+        alpha = self.alpha
+        beta = self.beta
         psi = 1/(1 + np.log(1 + alpha * psr)) - beta
         return psi
 
@@ -478,7 +485,7 @@ if __name__ == '__main__':
 
     ax_flag = True
 
-    cap = cv2.VideoCapture("./video/1.mp4")
+    cap = cv2.VideoCapture("./video/2.mp4")
     #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
