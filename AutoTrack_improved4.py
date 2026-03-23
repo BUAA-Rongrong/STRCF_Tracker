@@ -3,10 +3,10 @@ import cv2
 import matplotlib.pyplot as plt
 from collections import deque
 
-# AutoTrack with Scale Filter - Based on AutoTrack_improved2.py
-# 添加独立尺度滤波器，不改变原始跟踪滤波器
+# AutoTrack4: 结合尺度滤波器 + Kalman位置修正
+# 基于 AutoTrack_improved2_scale.py 和 AutoTrack_improved_Kalman.py 合并
 
-class AutoTrackScale:
+class AutoTrack4:
     def __init__(self):
         # ================= 超参数 =================
         self.padding = 1
@@ -69,7 +69,6 @@ class AutoTrackScale:
         # 基础目标尺寸
         self.base_target_sz = None
         self.im_shape = None
-        self.scale_hog_size = None
         self.scale_model_sz = None
 
         # ================= 状态 =================
@@ -101,6 +100,31 @@ class AutoTrackScale:
         self.disp_queue = deque(maxlen=self.K)
         self.psi_queue = deque(maxlen=self.K)
 
+        # ================= 卡尔曼滤波器（用于位置修正）=================
+        self.kf = cv2.KalmanFilter(4, 2)
+
+        dt = 1.0
+        self.kf.transitionMatrix = np.array([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ], dtype=np.float32)
+
+        self.kf.measurementMatrix = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0]
+        ], dtype=np.float32)
+
+        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
+        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
+        self.kf.errorCovPost = np.eye(4, dtype=np.float32)
+
+        # 卡尔曼融合权重参数
+        self.kalman_weight_high_psr = 0.0
+        self.kalman_weight_low_psr = 0.0
+        self.psr_smooth_threshold = 6.0
+
     # ==================================================
     # 初始化
     # ==================================================
@@ -111,8 +135,8 @@ class AutoTrackScale:
 
         self.pos = np.array([y + h / 2, x + w / 2], dtype=np.float32)
         self.target_sz = np.array([h, w], dtype=np.float32)
-        self.base_target_sz = self.target_sz.copy()  # 保存基础尺寸
-        self.im_shape = frame.shape[:2]  # 保存图像尺寸
+        self.base_target_sz = self.target_sz.copy()
+        self.im_shape = frame.shape[:2]
         self.window_sz = np.floor(self.target_sz * (1 + self.padding)).astype(int)
 
         cs = self.hog_cell_size
@@ -156,43 +180,92 @@ class AutoTrackScale:
         self.response_prev = response
         self.disp_prev = disp
 
+        # 初始化卡尔曼滤波器状态
+        self.kf.statePost = np.array([
+            [self.pos[1]],  # cx
+            [self.pos[0]],  # cy
+            [0],            # vx
+            [0]             # vy
+        ], dtype=np.float32)
+        self.kf.statePre = self.kf.statePost.copy()
+
+        print("AutoTrack4 initialized with Scale Filter + Kalman Position Correction")
+        print(f"Initial position: ({self.pos[1]:.2f}, {self.pos[0]:.2f})")
+        print(f"Initial target size: {w}x{h}")
+
     # ==================================================
     # 跟踪
     # ==================================================
     def track(self, frame):
-        # 1. 检测阶段，得到响应图
-        disp, response = self._detect(frame)
-        self.pos += disp
+        """
+        跟踪流程：
+        1. 卡尔曼预测
+        2. 相关滤波检测
+        3. 尺度检测
+        4. 卡尔曼位置融合
+        5. 更新ref_mu
+        6. 训练滤波器（位置+尺度）
+        7. 更新卡尔曼
+        """
 
-        # 2. 尺度检测
+        # ========== Step 1: 卡尔曼预测 ==========
+        prediction = self.kf.predict()
+        pred_cx = prediction[0, 0]
+        pred_cy = prediction[1, 0]
+        predicted_pos = np.array([pred_cy, pred_cx], dtype=np.float32)
+
+        # ========== Step 2: 相关滤波检测 ==========
+        disp, response = self._detect(frame)
+        detected_pos = self.pos + disp
+
+        # ========== Step 3: 尺度检测 ==========
         if self.scale_initialized:
             self._detect_scale(frame, self.pos)
         else:
             self.scale_initialized = True
 
-        # 3. 更新目标显示尺寸
+        # 更新目标显示尺寸
         self.target_sz = self.base_target_sz * self.current_scale_factor
 
-        # 4. 从第2帧开始，更新ref_mu
-        occ = False
+        # ========== Step 4: 计算PSR ==========
+        psr = self.compute_psr(response)
 
+        # ========== Step 5: 卡尔曼位置融合 ==========
+        fusion_weight = self._compute_fusion_weight(psr)
+        corrected_pos = fusion_weight * predicted_pos + (1 - fusion_weight) * detected_pos
+
+        # 更新位置为融合后的位置
+        self.pos = corrected_pos
+
+        # ========== Step 6: 更新卡尔曼滤波器 ==========
+        measurement = np.array([
+            [self.pos[1]],  # cx
+            [self.pos[0]]   # cy
+        ], dtype=np.float32)
+
+        obs_noise = self._adaptive_observation_noise(psr)
+        self.kf.measurementNoiseCov[:] = obs_noise
+        self.kf.correct(measurement)
+
+        # ========== Step 7: 更新ref_mu ==========
+        occ = False
         if response is not None and self.response_prev is not None:
             response_diff = self._align_and_diff_response(response, disp)
-            psr = self.compute_psr(response)
             ref_mu, occ = self._update_ref_mu1(response, psr, self.theta_max, self.theta_min)
             self.ref_mu = ref_mu
             self.mu = self.zeta
+
             delta_resp = self.delta * np.log(1 + response_diff)
             delta_resp = cv2.blur(delta_resp, (3, 3))
             self.reg_window1 = np.clip(self.reg_window + delta_resp, self.reg_min, self.reg_max)
 
-        # 5. 当响应值小于阈值则进行训练
+        # ========== Step 8: 训练滤波器 ==========
         if occ == False:
             self._train(frame, response, disp)
             # 更新尺度模型
             self._update_scale_model(frame, self.pos)
 
-        # 响应图对齐后push到队列中
+        # ========== Step 9: 更新历史队列 ==========
         self.resp_queue.appendleft(response)
         self.disp_queue.appendleft(disp)
         psi = self.compute_psi_from_psr(self.psr)
@@ -200,6 +273,11 @@ class AutoTrackScale:
 
         self.response_prev = response
         self.disp_prev = disp
+
+        # 打印位置信息
+        print(f"Detected: ({detected_pos[1]:.1f}, {detected_pos[0]:.1f}) | "
+              f"Kalman: ({pred_cx:.1f}, {pred_cy:.1f}) | "
+              f"Fused: ({corrected_pos[1]:.1f}, {corrected_pos[0]:.1f})")
 
         return self.pos.copy(), self.target_sz.copy(), response
 
@@ -241,8 +319,7 @@ class AutoTrackScale:
 
         alpha = 0
         R = 0
-        # 增加对前K帧的处理
-        if len(self.resp_queue) == self.K:
+        if len(self.resp_queue) == self.K and disp is not None:
             dy0, dx0 = int(disp[0] / self.hog_cell_size), int(disp[1] / self.hog_cell_size)
             for Rk, dispk, psik in zip(self.resp_queue, self.disp_queue, self.psi_queue):
                 alpha += psik
@@ -328,7 +405,7 @@ class AutoTrackScale:
         return hog_feat
 
     # ==================================================
-    # 对齐(用于计算当前响应与前一帧响应的差值）
+    # 对齐
     # ==================================================
     def _align_and_diff_response(self, response, disp):
         dy, dx = int(disp[0] / self.hog_cell_size), int(disp[1] / self.hog_cell_size)
@@ -351,7 +428,7 @@ class AutoTrackScale:
             return 50.0, True
 
     def _update_ref_mu1(self, response, psr, theta_max, theta_min):
-        psr_value = 8
+        psr_value = 8.0
         alpha = self.alpha1
         if psr > psr_value:
             ref_mu = theta_min + (theta_max - theta_min) * np.exp(-alpha * (psr - psr_value))
@@ -384,6 +461,28 @@ class AutoTrackScale:
         return psi
 
     # ==================================================
+    # 卡尔曼相关方法
+    # ==================================================
+    def _compute_fusion_weight(self, psr):
+        if psr > self.psr_smooth_threshold:
+            return self.kalman_weight_high_psr
+        else:
+            ratio = max(0, min(1, psr / self.psr_smooth_threshold))
+            weight = self.kalman_weight_low_psr + (self.kalman_weight_high_psr - self.kalman_weight_low_psr) * ratio
+            return weight
+
+    def _adaptive_observation_noise(self, psr):
+        min_noise = 0.1
+        max_noise = 5.0
+
+        if psr > self.psr_smooth_threshold:
+            noise = min_noise
+        else:
+            noise = max_noise - (max_noise - min_noise) * (psr / self.psr_smooth_threshold)
+
+        return (np.eye(2, dtype=np.float32) * np.float32(noise)).astype(np.float32)
+
+    # ==================================================
     # 工具
     # ==================================================
     def _gaussian_label(self, sz, sigma):
@@ -405,21 +504,17 @@ class AutoTrackScale:
         n = self.num_scales
         self.scale_factors = self.scale_step ** (np.arange(n) - n // 2)
 
-        # 创建尺度高斯标签
         scale_sigma = np.sqrt(n) * self.scale_sigma_factor
         ss = np.arange(n) - n // 2
         ys = np.exp(-0.5 * (ss ** 2) / scale_sigma ** 2)
         self.ysf = np.fft.fft(ys)
 
-        # 创建尺度窗口
         self.scale_window = np.hanning(n)
 
-        # 尺度模型尺寸
         self.scale_model_sz = (self.base_target_sz * self.scale_model_factor).astype(int)
         if self.base_target_sz[0] * self.base_target_sz[1] * self.scale_model_factor ** 2 > self.scale_model_max_area[0] * self.scale_model_max_area[1]:
             self.scale_model_sz = self.scale_model_max_area.astype(int)
 
-        # 创建尺度滤波器专用的HOG描述器
         cs = self.hog_cell_size
         self.scale_hog = cv2.HOGDescriptor(
             _winSize=(self.scale_model_sz[1], self.scale_model_sz[0]),
@@ -429,7 +524,6 @@ class AutoTrackScale:
             _nbins=self.hog_nbins
         )
 
-        # 设置尺度范围
         min_scale = np.max(5.0 / self.base_target_sz)
         max_scale = np.min([self.im_shape[0], self.im_shape[1]] / self.base_target_sz)
 
@@ -505,7 +599,6 @@ class AutoTrackScale:
 
     def _detect_scale(self, frame, pos):
         """检测最佳尺度"""
-        # 修复：使用当前实际目标尺寸作为base
         current_target_sz = self.base_target_sz * self.current_scale_factor
         scale_factors = self.scale_factors
 
@@ -513,18 +606,14 @@ class AutoTrackScale:
         xs = self._extract_scale_sample(frame, pos, current_target_sz, scale_factors)
         xsf = np.fft.fft(xs, axis=1)
 
-        # 计算尺度响应
         scale_response = np.real(np.fft.ifft(
             np.sum(self.sf_num * xsf, axis=0) / (self.sf_den + self.scale_lambda)
         ))
 
-        # 找到最佳尺度
         recovered_scale = np.argmax(scale_response)
 
-        # 更新当前尺度因子（乘以相对尺度）
         self.current_scale_factor *= scale_factors[recovered_scale]
 
-        # 限制在范围内
         self.current_scale_factor = np.clip(
             self.current_scale_factor,
             self.min_scale_factor,
@@ -533,19 +622,16 @@ class AutoTrackScale:
 
     def _update_scale_model(self, frame, pos):
         """更新尺度模型"""
-        # 修复：使用当前实际目标尺寸作为base
         current_target_sz = self.base_target_sz * self.current_scale_factor
         scale_factors = self.scale_factors
 
-        # 提取尺度样本
+        # 提取尺度样本（基于当前目标尺寸）
         xs = self._extract_scale_sample(frame, pos, current_target_sz, scale_factors)
         xsf = np.fft.fft(xs, axis=1)
 
-        # 计算新的滤波器参数
         new_sf_num = self.ysf * np.conj(xsf)
         new_sf_den = np.sum(xsf * np.conj(xsf), axis=0)
 
-        # 更新模型
         if self.sf_num is None:
             self.sf_num = new_sf_num
             self.sf_den = new_sf_den
@@ -555,47 +641,61 @@ class AutoTrackScale:
 
 
 if __name__ == '__main__':
-    ax_flag = True
-
-    # 设置图表字体为 Times New Roman
-    plt.rcParams['font.family'] = 'Times New Roman'
-    plt.rcParams['mathtext.fontset'] = 'stix'
+    ax_flag = False
 
     cap = cv2.VideoCapture("./video/output2.mp4")
-    #cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
 
     if not ret:
         print("Failed to read video")
         exit()
 
-    bbox = cv2.selectROI("AutoTrack Init", frame, False, False)
-    cv2.destroyWindow("AutoTrack Init")
+    bbox = cv2.selectROI("AutoTrack4 Init", frame, False, False)
+    cv2.destroyWindow("AutoTrack4 Init")
 
-    tracker = AutoTrackScale()
+    tracker = AutoTrack4()
     tracker.init(frame, bbox)
 
     frame_idx = 0
     scale_history = []
+    psr_history = []
+    weight_history = []
 
     if ax_flag:
         plt.ion()
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 10))
 
         ax1.set_title("PSR over Time")
         ax1.set_xlabel("Frame")
         ax1.set_ylabel("PSR")
+        ax1.axhline(y=tracker.psr_smooth_threshold, color='g', linestyle='--', label='PSR Threshold')
+        ax1.legend()
         psr_x, psr_y = [], []
-        line_psr, = ax1.plot([], [], lw=2)
+        line_psr, = ax1.plot([], [], 'b-', lw=2)
 
-        ax2.set_title("Response Heatmap")
-        heatmap = ax2.imshow(
+        ax2.set_title("Scale Factor")
+        ax2.set_xlabel("Frame")
+        ax2.set_ylabel("Scale")
+        scale_x, scale_y = [], []
+        line_scale, = ax2.plot([], [], 'r-', lw=2)
+
+        ax3.set_title("Kalman Fusion Weight")
+        ax3.set_xlabel("Frame")
+        ax3.set_ylabel("Weight")
+        ax3.set_ylim(0, 1)
+        weight_x, weight_y = [], []
+        line_weight, = ax3.plot([], [], 'g-', lw=2)
+
+        ax4.set_title("Response Heatmap")
+        heatmap = ax4.imshow(
             np.zeros((tracker.Hc, tracker.Wc)),
             cmap="jet",
             interpolation="nearest",
             origin="upper"
         )
-        plt.colorbar(heatmap, ax=ax2)
+        plt.colorbar(heatmap, ax=ax4)
+
+        plt.tight_layout()
 
     while True:
         ret, frame = cap.read()
@@ -608,52 +708,54 @@ if __name__ == '__main__':
 
         frame_idx += 1
         scale_history.append(tracker.current_scale_factor)
+        psr_history.append(tracker.psr)
+        weight_history.append(tracker._compute_fusion_weight(tracker.psr))
 
         if ax_flag:
-            psr = tracker.psr
-            psr_x.append(len(psr_x))
-            psr_y.append(psr)
+            psr_x.append(frame_idx)
+            psr_y.append(tracker.psr)
             line_psr.set_data(psr_x, psr_y)
             ax1.relim()
             ax1.autoscale_view()
+
+            scale_x.append(frame_idx)
+            scale_y.append(tracker.current_scale_factor)
+            line_scale.set_data(scale_x, scale_y)
+            ax2.relim()
+            ax2.autoscale_view()
+
+            weight_x.append(frame_idx)
+            weight_y.append(tracker._compute_fusion_weight(tracker.psr))
+            line_weight.set_data(weight_x, weight_y)
+            ax3.relim()
+            ax3.autoscale_view()
 
             heatmap.set_data(response)
             heatmap.set_clim(vmin=response.min(), vmax=response.max())
 
             plt.pause(0.001)
 
+        # 绘制跟踪框
+        psr = tracker.psr
+        if psr > tracker.psr_smooth_threshold:
+            color = (0, 255, 0)
+        else:
+            ratio = psr / tracker.psr_smooth_threshold
+            color = (0, int(255 * ratio), int(255 * (1 - ratio)))
+
         cv2.rectangle(
             frame,
             (cx - w // 2, cy - h // 2),
             (cx + w // 2, cy + h // 2),
-            (0, 255, 0), 2
+            color, 2
         )
 
-        # 显示信息
-        info_text = [
-            f"Frame: {frame_idx}",
-            f"Scale: {tracker.current_scale_factor:.3f}",
-            f"Size: {w}x{h}",
-            f"PSR: {tracker.psr:.2f}"
-        ]
+        cv2.putText(frame, f"Frame: {frame_idx} | PSR: {psr:.2f} | Scale: {tracker.current_scale_factor:.3f}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        for i, text in enumerate(info_text):
-            cv2.putText(frame, text, (10, 30 + i * 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        cv2.imshow("AutoTrack with Scale", frame)
+        cv2.imshow("AutoTrack4: Scale + Kalman", frame)
         if cv2.waitKey(1) & 0xFF == 27:
             break
-
-    # 绘制尺度变化曲线
-    if len(scale_history) > 0:
-        plt.figure(figsize=(10, 4))
-        plt.plot(scale_history)
-        plt.title("Scale Factor over Time")
-        plt.xlabel("Frame")
-        plt.ylabel("Scale Factor")
-        plt.grid(True)
-        plt.show()
 
     cap.release()
     cv2.destroyAllWindows()
